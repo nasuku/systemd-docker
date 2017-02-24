@@ -83,7 +83,16 @@ func parseContext(args []string) (*Context, error) {
 	flags.BoolVar(&c.Env, []string{"e", "-env"}, false, "inherit environment variable")
 	flags.Var(&flCgroups, []string{"c", "-cgroups"}, "cgroups to take ownership of or 'all' for all cgroups available")
 
-	err := flags.Parse(args)
+	i := findRunArg(args)
+	if i < 0 {
+		log.Println("Args:", args)
+		return nil, errors.New("run not found in arguments")
+	}
+
+	ownArgs := args[:i]
+	runArgs := args[i+1:]
+
+	err := flags.Parse(ownArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +100,6 @@ func parseContext(args []string) (*Context, error) {
 	foundD := false
 	var name string
 
-	runArgs := flags.Args()
-	if len(runArgs) == 0 || runArgs[0] != "run" {
-		log.Println("Args:", runArgs)
-		return nil, errors.New("run not found in arguments")
-	}
-
-	runArgs = runArgs[1:]
 	newArgs := make([]string, 0, len(runArgs))
 
 	for i, arg := range runArgs {
@@ -143,6 +145,15 @@ func parseContext(args []string) (*Context, error) {
 	setupEnvironment(c)
 
 	return c, nil
+}
+
+func findRunArg(args []string) int {
+	for i, arg := range args {
+		if arg == "run" {
+			return i
+		}
+	}
+	return -1
 }
 
 func lookupNamedContainer(c *Context) error {
