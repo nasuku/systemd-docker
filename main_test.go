@@ -243,7 +243,7 @@ func TestParseCgroups(t *testing.T) {
 	if val, ok := cgroups["blkio"]; ok {
 		p := path.Join(SYSFS, "blkio", val)
 		if _, err := os.Stat(p); os.IsNotExist(err) {
-			log.Fatalf("Path does not exist %s", p, err)
+			log.Fatalf("Path does not exist %s err:%s", p, err)
 		}
 	} else {
 		log.Fatal("Failed to find blkio cgroup", val)
