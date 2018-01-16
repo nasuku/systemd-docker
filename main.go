@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -30,7 +29,6 @@ var (
 
 type Context struct {
 	Args         []string
-	Cgroups      []string
 	AllCgroups   bool
 	Logs         bool
 	Notify       bool
@@ -81,9 +79,18 @@ func parseContext(args []string) (*Context, error) {
 	flags.BoolVar(&c.Logs, []string{"l", "-logs"}, true, "pipe logs")
 	flags.BoolVar(&c.Notify, []string{"n", "-notify"}, false, "setup systemd notify for container")
 	flags.BoolVar(&c.Env, []string{"e", "-env"}, false, "inherit environment variable")
-	flags.Var(&flCgroups, []string{"c", "-cgroups"}, "cgroups to take ownership of or 'all' for all cgroups available")
+	flags.Var(&flCgroups, []string{"c", "-cgroups"}, "cgroups is ignored. Kept to keep any scripts working..")
 
-	err := flags.Parse(args)
+	i := findRunArg(args)
+	if i < 0 {
+		log.Println("Args:", args)
+		return nil, errors.New("run not found in arguments")
+	}
+
+	ownArgs := args[:i]
+	runArgs := args[i+1:]
+
+	err := flags.Parse(ownArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +98,6 @@ func parseContext(args []string) (*Context, error) {
 	foundD := false
 	var name string
 
-	runArgs := flags.Args()
-	if len(runArgs) == 0 || runArgs[0] != "run" {
-		log.Println("Args:", runArgs)
-		return nil, errors.New("run not found in arguments")
-	}
-
-	runArgs = runArgs[1:]
 	newArgs := make([]string, 0, len(runArgs))
 
 	for i, arg := range runArgs {
@@ -130,19 +130,19 @@ func parseContext(args []string) (*Context, error) {
 	c.Name = name
 	c.NotifySocket = os.Getenv("NOTIFY_SOCKET")
 	c.Args = newArgs
-	c.Cgroups = flCgroups.GetAll()
-
-	for _, val := range c.Cgroups {
-		if val == "all" {
-			c.Cgroups = nil
-			c.AllCgroups = true
-			break
-		}
-	}
 
 	setupEnvironment(c)
 
 	return c, nil
+}
+
+func findRunArg(args []string) int {
+	for i, arg := range args {
+		if arg == "run" {
+			return i
+		}
+	}
+	return -1
 }
 
 func lookupNamedContainer(c *Context) error {
@@ -262,7 +262,7 @@ func getClient(c *Context) (*dockerClient.Client, error) {
 		endpoint = "unix:///var/run/docker.sock"
 	}
 
-	return dockerClient.NewVersionedClient(endpoint, "1.12")
+	return dockerClient.NewClient(endpoint)
 }
 
 func getContainerPid(c *Context) (int, error) {
@@ -338,114 +338,6 @@ func getCgroupPids(cgroupName string, cgroupPath string) ([]string, error) {
 
 func writePid(pid string, path string) error {
 	return ioutil.WriteFile(path, []byte(pid), 0644)
-}
-
-func moveCgroups(c *Context) (bool, error) {
-	moved := false
-	currentCgroups, err := getCgroupsForPid(os.Getpid())
-	if err != nil {
-		return false, err
-	}
-
-	containerCgroups, err := getCgroupsForPid(c.Pid)
-	if err != nil {
-		return false, err
-	}
-
-	var ns []string
-
-	if c.AllCgroups || c.Cgroups == nil || len(c.Cgroups) == 0 {
-		ns = make([]string, 0, len(containerCgroups))
-		for value, _ := range containerCgroups {
-			ns = append(ns, value)
-		}
-	} else {
-		ns = c.Cgroups
-	}
-
-	for _, nsName := range ns {
-		currentPath, ok := currentCgroups[nsName]
-		if !ok {
-			continue
-		}
-
-		containerPath, ok := containerCgroups[nsName]
-		if !ok {
-			continue
-		}
-
-		if currentPath == containerPath || containerPath == "/" {
-			continue
-		}
-
-		pids, err := getCgroupPids(nsName, containerPath)
-		if err != nil {
-			return false, err
-		}
-
-		for _, pid := range pids {
-			pidInt, err := strconv.Atoi(pid)
-			if err != nil {
-				continue
-			}
-
-			if pidDied(pidInt) {
-				continue
-			}
-
-			currentFullPath := constructCgroupPath(nsName, currentPath)
-			log.Printf("Moving pid %s to %s\n", pid, currentFullPath)
-			err = writePid(pid, currentFullPath)
-			if err != nil {
-				return false, err
-			}
-
-			moved = true
-		}
-	}
-
-	return moved, nil
-}
-
-func pidDied(pid int) bool {
-	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	return os.IsNotExist(err)
-}
-
-func notify(c *Context) error {
-	if pidDied(c.Pid) {
-		return errors.New("Container exited before we could notify systemd")
-	}
-
-	if len(c.NotifySocket) == 0 {
-		return nil
-	}
-
-	conn, err := net.Dial("unixgram", c.NotifySocket)
-	if err != nil {
-		return err
-	}
-
-	defer conn.Close()
-
-	_, err = conn.Write([]byte(fmt.Sprintf("MAINPID=%d", c.Pid)))
-	if err != nil {
-		return err
-	}
-
-	if pidDied(c.Pid) {
-		conn.Write([]byte(fmt.Sprintf("MAINPID=%d", os.Getpid())))
-		return errors.New("Container exited before we could notify systemd")
-	}
-
-	if !c.Notify {
-		_, err = conn.Write([]byte("READY=1"))
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func pidFile(c *Context) error {
@@ -535,7 +427,7 @@ func mainWithArgs(args []string) (*Context, error) {
 		return c, err
 	}
 
-	_, err = moveCgroups(c)
+	/*_, err = moveCgroups(c)
 	if err != nil {
 		return c, err
 	}
@@ -543,7 +435,7 @@ func mainWithArgs(args []string) (*Context, error) {
 	err = notify(c)
 	if err != nil {
 		return c, err
-	}
+	}*/
 
 	err = pidFile(c)
 	if err != nil {
